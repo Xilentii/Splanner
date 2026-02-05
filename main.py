@@ -116,7 +116,7 @@ class SchedulerApp:
         self.tree.column("Colleague", anchor=tk.W, width=120)
         
         for col in columns[1:]:
-            self.tree.column(col, anchor=tk.CENTER, width=70)
+            self.tree.column(col, anchor=tk.CENTER, width=90)
         
         self.tree.heading("#0", text="", anchor=tk.W)
         self.tree.heading("Colleague", text="Colleague", anchor=tk.W)
