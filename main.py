@@ -266,6 +266,58 @@ class SchedulerApp:
             self.tree.bind("<Button-1>", self.on_tree_click)
         except Exception:
             pass
+
+    def build_tree(self):
+        # clear existing tree if present
+        for child in self.tree_container.winfo_children():
+            child.destroy()
+
+        days = int(self.weeks_spin.get()) * 7 if hasattr(self, 'weeks_spin') else self.weeks_view * 7
+        start = self.view_start_date
+
+        columns = ["Colleague", "Hours"] + [(start + timedelta(days=i)).strftime("%a\n%m/%d") for i in range(days)]
+
+        scrollbar = ttk.Scrollbar(self.tree_container)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree = ttk.Treeview(self.tree_container, columns=columns, height=20, yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.tree.yview)
+
+        self.tree.column("#0", width=0, stretch=tk.NO)
+        self.tree.column("Colleague", anchor=tk.W, width=160)
+        self.tree.column("Hours", anchor=tk.CENTER, width=80)
+
+        for col in columns[2:]:
+            self.tree.column(col, anchor=tk.CENTER, width=110)
+
+        self.tree.heading("#0", text="", anchor=tk.W)
+        self.tree.heading("Colleague", text="Colleague", anchor=tk.W)
+        self.tree.heading("Hours", text="Hours", anchor=tk.CENTER)
+
+        for col in columns[2:]:
+            self.tree.heading(col, text=col, anchor=tk.CENTER)
+
+        self.tree.pack(fill=tk.BOTH, expand=True)
+
+        # Setup simple tag styles for row coloring by default shift
+        style_map = {
+            'Day Shift (09-21)': '#ffd7a6',
+            'Day Shift (12-24)': '#ffd7a6',
+            'Night Shift (21-09)': '#cfe8ff',
+            'Developer Shift (09-18)': '#d6f5d6',
+            'Daily Work Day (09-18)': '#d6f5d6',
+            'Rest': '#f0f0f0'
+        }
+        for k, color in style_map.items():
+            try:
+                self.tree.tag_configure(k, background=color)
+            except Exception:
+                pass
+
+        try:
+            self.tree.bind("<Button-1>", self.on_tree_click)
+        except Exception:
+            pass
         
     def add_colleague(self):
         # Add a colleague from the input fields
