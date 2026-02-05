@@ -39,58 +39,51 @@ class WorkScheduler:
             self.meta[name] = {"default": default, "offset": int(offset), "can_fill": bool(can_fill)}
             
     def generate_schedule(self, start_date, num_weeks=1):
-        """Generate schedule using work/rest pattern and per-colleague default shift variants.
-
-        - Pattern: PATTERN (e.g., 2 work, 2 rest)
-        - For colleagues with weekday-only defaults (Daily/Developer), only assign work on Mon-Fri
-        """
+        # Generate base schedule per colleague using pattern + offset
         self.schedule = {}
 
-        # boolean pattern for work/rest days, e.g. [True, True, False, False]
+        # boolean pattern for work/rest days (e.g. [True, True, False, False])
         pattern_bool = []
         for i, count in enumerate(self.PATTERN):
-            # alternate work(True)/rest(False) starting with work
             pattern_bool.extend([i % 2 == 0] * count)
 
         for colleague in self.colleagues:
             colleague_schedule = []
-            defaults_shift = self.meta.get(colleague, {}).get("default", self.SHIFT_TYPES[0])
+            default_shift = self.meta.get(colleague, {}).get("default", self.SHIFT_TYPES[0])
             offset = int(self.meta.get(colleague, {}).get("offset", 0))
+
             pattern_cycle = cycle(pattern_bool)
-            # advance pattern by offset to stagger rotation
             for _ in range(offset % len(pattern_bool)):
                 next(pattern_cycle)
 
             current_date = start_date
-            for i in range(num_weeks * 7):
+            for _ in range(num_weeks * 7):
                 is_work = next(pattern_cycle)
                 date_str = current_date.strftime("%Y-%m-%d")
 
-                # if it's a work day in the pattern, decide the actual shift
                 if is_work:
-                    # weekday-only shifts should only occur Mon-Fri
-                        if defaults_shift in ("Daily Work Day (09-18)", "Developer Shift (09-18)") and current_date.weekday() >= 5:
+                    # weekday-only shifts should not be scheduled on weekends
+                    if default_shift in ("Daily Work Day (09-18)", "Developer Shift (09-18)") and current_date.weekday() >= 5:
                         shift = "Rest"
                     else:
-                        shift = defaults_shift
+                        shift = default_shift
                 else:
                     shift = "Rest"
 
-                colleague_schedule.append({
-                    "date": date_str,
-                    "shift": shift
-                })
+                colleague_schedule.append({"date": date_str, "shift": shift})
                 current_date += timedelta(days=1)
 
             self.schedule[colleague] = colleague_schedule
 
-        # Post-process each date to satisfy staffing constraints
+        # Post-process to enforce staffing constraints and balance hours
+        hours_map = self.compute_hours_for_period(start_date, num_weeks)
         days = num_weeks * 7
-        for day_idx in range(days):
-            date = (start_date + timedelta(days=day_idx)).strftime("%Y-%m-%d")
 
-            # helper to count shifts
-            def count_shift_types(date):
+        for day_idx in range(days):
+            date_obj = start_date + timedelta(days=day_idx)
+            weekday = date_obj.weekday()
+
+            def count_shift_types():
                 counts = {k: 0 for k in self.SHIFT_TYPES}
                 for c in self.colleagues:
                     sched = self.schedule.get(c, [])
@@ -100,141 +93,81 @@ class WorkScheduler:
                             counts[s] += 1
                 return counts
 
-            counts = count_shift_types(date)
-            weekday = (start_date + timedelta(days=day_idx)).weekday()  # 0=Mon
+            counts = count_shift_types()
 
-            # Ensure at least one night shift exists (always)
-            if counts.get("Night Shift (21-09)", 0) == 0:
-                # prefer colleagues with Night default who are Rest
-                promoted = False
+            def find_candidate(preferred_defaults=None, require_can_fill=False):
+                candidates = []
                 for c in self.colleagues:
-                    default = self.defaults.get(c, '')
                     sched = self.schedule.get(c, [])
-                    if day_idx < len(sched) and sched[day_idx]['shift'] == 'Rest' and default == 'Night Shift (21-09)':
-                        sched[day_idx]['shift'] = 'Night Shift (21-09)'
-                        promoted = True
+                    if day_idx < len(sched) and sched[day_idx]['shift'] == 'Rest':
+                        meta = self.meta.get(c, {})
+                        default = meta.get('default', '')
+                        can_fill = meta.get('can_fill', False)
+                        if preferred_defaults:
+                            prefs = list(preferred_defaults) if not isinstance(preferred_defaults, (list, tuple, set)) else preferred_defaults
+                            if default not in prefs:
+                                continue
+                        if require_can_fill and not can_fill:
+                            continue
+                        candidates.append(c)
+                if not candidates:
+                    return None
+                candidates.sort(key=lambda x: hours_map.get(x, 0.0))
+                return candidates[0]
+
+            # Ensure at least one night shift exists
+            if counts.get("Night Shift (21-09)", 0) == 0:
+                cand = find_candidate(preferred_defaults=("Night Shift (21-09)",))
+                if not cand:
+                    cand = find_candidate()
+                if cand:
+                    self.schedule[cand][day_idx]['shift'] = 'Night Shift (21-09)'
+                    hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours('Night Shift (21-09)')
+
+            if weekday < 5:
+                # Weekday: ensure one Daily/Developer and one Day Shift
+                daily_count = counts.get('Daily Work Day (09-18)', 0) + counts.get('Developer Shift (09-18)', 0)
+                if daily_count == 0:
+                    cand = find_candidate(require_can_fill=True)
+                    if not cand:
+                        cand = find_candidate(preferred_defaults=("Daily Work Day (09-18)", "Developer Shift (09-18)"))
+                    if not cand:
+                        cand = find_candidate()
+                    if cand:
+                        default = self.meta.get(cand, {}).get('default', 'Daily Work Day (09-18)')
+                        self.schedule[cand][day_idx]['shift'] = default
+                        hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours(default)
+
+                day_count = sum(counts.get(k, 0) for k in self.SHIFT_TYPES if k.startswith('Day Shift'))
+                if day_count == 0:
+                    prefs = [s for s in self.SHIFT_TYPES if s.startswith('Day Shift')]
+                    cand = find_candidate(preferred_defaults=prefs)
+                    if not cand:
+                        cand = find_candidate()
+                    if cand:
+                        default = self.meta.get(cand, {}).get('default', 'Day Shift (09-21)')
+                        if not default.startswith('Day Shift'):
+                            default = 'Day Shift (09-21)'
+                        self.schedule[cand][day_idx]['shift'] = default
+                        hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours(default)
+
+            else:
+                # Weekend: ensure two Day Shifts
+                day_count = sum(counts.get(k, 0) for k in self.SHIFT_TYPES if k.startswith('Day Shift'))
+                while day_count < 2:
+                    cand = find_candidate(require_can_fill=True)
+                    if not cand:
+                        cand = find_candidate(preferred_defaults=[s for s in self.SHIFT_TYPES if s.startswith('Day Shift')])
+                    if not cand:
+                        cand = find_candidate()
+                    if not cand:
                         break
-                if not promoted:
-                    # promote any 12-hour worker who is Rest
-                    for c in self.colleagues:
-                        sched = self.schedule.get(c, [])
-                        if day_idx < len(sched) and sched[day_idx]['shift'] == 'Rest':
-                            # Post-process each date to satisfy staffing constraints and balance hours
-                            days = num_weeks * 7
-
-                            # compute initial hours map for the generated schedule
-                            hours_map = self.compute_hours_for_period(start_date, num_weeks)
-
-                            for day_idx in range(days):
-                                date_obj = start_date + timedelta(days=day_idx)
-                                date = date_obj.strftime("%Y-%m-%d")
-
-                                # helper to count shifts
-                                def count_shift_types():
-                                    counts = {k: 0 for k in self.SHIFT_TYPES}
-                                    for c in self.colleagues:
-                                        sched = self.schedule.get(c, [])
-                                        if day_idx < len(sched):
-                                            s = sched[day_idx].get('shift', '')
-                                            if s in counts:
-                                                counts[s] += 1
-                                    return counts
-
-                                counts = count_shift_types()
-                                weekday = date_obj.weekday()  # 0=Mon
-
-                                # helper: find rest candidates with optional default filter and can_fill preference, return candidate with least hours
-                                def find_candidate(preferred_defaults=None, require_can_fill=False):
-                                    candidates = []
-                                    for c in self.colleagues:
-                                        sched = self.schedule.get(c, [])
-                                        if day_idx < len(sched) and sched[day_idx]['shift'] == 'Rest':
-                                            meta = self.meta.get(c, {})
-                                            default = meta.get('default', '')
-                                            can_fill = meta.get('can_fill', False)
-                                            if preferred_defaults and default not in preferred_defaults:
-                                                continue
-                                            if require_can_fill and not can_fill:
-                                                continue
-                                            candidates.append(c)
-                                    if not candidates:
-                                        return None
-                                    # choose candidate with minimal assigned hours so far
-                                    candidates.sort(key=lambda x: hours_map.get(x, 0.0))
-                                    return candidates[0]
-
-                                # Ensure at least one night shift exists (always)
-                                if counts.get("Night Shift (21-09)", 0) == 0:
-                                    cand = find_candidate(preferred_defaults=("Night Shift (21-09)",))
-                                    if not cand:
-                                        cand = find_candidate()
-                                    if cand:
-                                        sched = self.schedule.get(cand, [])
-                                        sched[day_idx]['shift'] = 'Night Shift (21-09)'
-                                        hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours('Night Shift (21-09)')
-
-                                # Weekday staffing
-                                if weekday < 5:
-                                    # Need at least one Daily/Developer
-                                    daily_count = counts.get('Daily Work Day (09-18)', 0) + counts.get('Developer Shift (09-18)', 0)
-                                    if daily_count == 0:
-                                        # prefer can_fill candidates first
-                                        cand = find_candidate(preferred_defaults=None, require_can_fill=True)
-                                        if not cand:
-                                            # prefer those whose default is Daily/Developer
-                                            cand = find_candidate(preferred_defaults=("Daily Work Day (09-18)", "Developer Shift (09-18)"))
-                                        if not cand:
-                                            cand = find_candidate()
-                                        if cand:
-                                            sched = self.schedule.get(cand, [])
-                                            sched[day_idx]['shift'] = self.meta.get(cand, {}).get('default', 'Daily Work Day (09-18)')
-                                            hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours(sched[day_idx]['shift'])
-
-                                    # Need at least one Day Shift
-                                    day_count = sum(counts.get(k, 0) for k in self.SHIFT_TYPES if k.startswith('Day Shift'))
-                                    if day_count == 0:
-                                        cand = find_candidate(preferred_defaults=(s for s in self.SHIFT_TYPES if s.startswith('Day Shift')))
-                                        if not cand:
-                                            cand = find_candidate()
-                                        if cand:
-                                            sched = self.schedule.get(cand, [])
-                                            default = self.meta.get(cand, {}).get('default', 'Day Shift (09-21)')
-                                            if not default.startswith('Day Shift'):
-                                                default = 'Day Shift (09-21)'
-                                            sched[day_idx]['shift'] = default
-                                            hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours(default)
-
-                                # Weekend staffing
-                                else:
-                                    # Daily/Developer don't work - ensure two Day Shifts present
-                                    day_count = sum(counts.get(k, 0) for k in self.SHIFT_TYPES if k.startswith('Day Shift'))
-                                    while day_count < 2:
-                                        # prefer can_fill, then day-defaults, then any Rest
-                                        cand = find_candidate(require_can_fill=True)
-                                        if not cand:
-                                            cand = find_candidate(preferred_defaults=(s for s in self.SHIFT_TYPES if s.startswith('Day Shift')))
-                                        if not cand:
-                                            cand = find_candidate()
-                                        if not cand:
-                                            break
-                                        sched = self.schedule.get(cand, [])
-                                        default = self.meta.get(cand, {}).get('default', 'Day Shift (09-21)')
-                                        if not default.startswith('Day Shift'):
-                                            default = 'Day Shift (09-21)'
-                                        sched[day_idx]['shift'] = default
-                                        hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours(default)
-                                        day_count += 1
-            sh, sm = [int(x) for x in start_s.split(':')]
-            eh, em = [int(x) for x in end_s.split(':')]
-            start_minutes = sh * 60 + sm
-            end_minutes = eh * 60 + em
-            # if end <= start, assume next day
-            if end_minutes <= start_minutes:
-                end_minutes += 24 * 60
-            minutes = end_minutes - start_minutes
-            return minutes / 60.0
-        except Exception:
-            return 0.0
+                    default = self.meta.get(cand, {}).get('default', 'Day Shift (09-21)')
+                    if not default.startswith('Day Shift'):
+                        default = 'Day Shift (09-21)'
+                    self.schedule[cand][day_idx]['shift'] = default
+                    hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours(default)
+                    day_count += 1
 
     def compute_hours_for_period(self, start_date: datetime, num_weeks: int) -> dict:
         """Compute assigned hours per colleague for period starting at start_date for num_weeks weeks."""
@@ -328,95 +261,28 @@ class SchedulerApp:
         self.tree_container = schedule_frame
         # build tree for first time
         self.build_tree()
-        
-        scrollbar = ttk.Scrollbar(schedule_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Create treeview for schedule display
-        columns = ["Colleague"] + [(self.current_date + timedelta(days=i)).strftime("%a\n%m/%d") for i in range(14)]
-        
-        self.tree = ttk.Treeview(schedule_frame, columns=columns, height=20, yscrollcommand=scrollbar.set)
-        scrollbar.config(command=self.tree.yview)
-        
-        self.tree.column("#0", width=0, stretch=tk.NO)
-        self.tree.column("Colleague", anchor=tk.W, width=120)
-        
-        for col in columns[1:]:
-            self.tree.column(col, anchor=tk.CENTER, width=110)
-        
-        self.tree.heading("#0", text="", anchor=tk.W)
-        self.tree.heading("Colleague", text="Colleague", anchor=tk.W)
-        
-        for col in columns[1:]:
-            self.tree.heading(col, text=col, anchor=tk.CENTER)
-        
-        self.tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Setup simple tag styles for row coloring by default shift
-        style_map = {
-            'Day Shift (09-21)': '#ffd7a6',
-            'Day Shift (12-24)': '#ffd7a6',
-            'Night Shift (21-09)': '#cfe8ff',
-            'Developer Shift (09-18)': '#d6f5d6',
-            'Daily Work Day (09-18)': '#d6f5d6',
-            'Rest': '#f0f0f0'
-        }
-        for k, color in style_map.items():
-            try:
-                self.tree.tag_configure(k, background=color)
-            except Exception:
-                pass
-        
-        # Bind click event for editing
-        self.tree.bind("<Button-1>", self.on_tree_click)
+        # Bind click event for editing (tree is created inside build_tree)
+        try:
+            self.tree.bind("<Button-1>", self.on_tree_click)
+        except Exception:
+            pass
         
     def add_colleague(self):
-        # Build tree for current view window
-        # clear existing tree if present
-        for child in self.tree_container.winfo_children():
-            child.destroy()
+        # Add a colleague from the input fields
+        name = self.colleague_entry.get().strip()
+        if not name:
+            messagebox.showwarning("Input Error", "Please enter a colleague name.")
+            return
+        default = self.default_shift_combo.get()
+        try:
+            offset = int(self.offset_spin.get())
+        except Exception:
+            offset = 0
+        can_fill = bool(self.can_fill_var.get())
 
-        days = int(self.weeks_spin.get()) * 7 if hasattr(self, 'weeks_spin') else self.weeks_view * 7
-        start = self.view_start_date
-
-        columns = ["Colleague", "Hours"] + [(start + timedelta(days=i)).strftime("%a\n%m/%d") for i in range(days)]
-
-        scrollbar = ttk.Scrollbar(self.tree_container)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.tree = ttk.Treeview(self.tree_container, columns=columns, height=20, yscrollcommand=scrollbar.set)
-        scrollbar.config(command=self.tree.yview)
-
-        self.tree.column("#0", width=0, stretch=tk.NO)
-        self.tree.column("Colleague", anchor=tk.W, width=160)
-        self.tree.column("Hours", anchor=tk.CENTER, width=80)
-
-        for col in columns[2:]:
-            self.tree.column(col, anchor=tk.CENTER, width=110)
-
-        self.tree.heading("#0", text="", anchor=tk.W)
-        self.tree.heading("Colleague", text="Colleague", anchor=tk.W)
-        self.tree.heading("Hours", text="Hours", anchor=tk.CENTER)
-
-        for col in columns[2:]:
-            self.tree.heading(col, text=col, anchor=tk.CENTER)
-
-        self.tree.pack(fill=tk.BOTH, expand=True)
-
-        # Setup simple tag styles for row coloring by default shift
-        style_map = {
-            'Day Shift (09-21)': '#ffd7a6',
-            'Day Shift (12-24)': '#ffd7a6',
-            'Night Shift (21-09)': '#cfe8ff',
-            'Developer Shift (09-18)': '#d6f5d6',
-            'Daily Work Day (09-18)': '#d6f5d6',
-            'Rest': '#f0f0f0'
-        }
-        for k, color in style_map.items():
-            try:
-                self.tree.tag_configure(k, background=color)
-            except Exception:
-                pass
+        self.scheduler.add_colleague(name, default_shift=default, offset=offset, can_fill=can_fill)
+        self.refresh_colleagues_listbox()
+        self.refresh_schedule_display()
 
     def edit_selected_default(self):
         selection = self.colleagues_listbox.curselection()
@@ -463,9 +329,27 @@ class SchedulerApp:
                 dialog.destroy()
 
         ttk.Button(dialog, text="Save", command=save_default).pack(pady=8)
-            self.refresh_schedule_display()
-            self.refresh_colleagues_listbox()
-            messagebox.showinfo("Success", f"Colleague '{colleague}' removed successfully!")
+
+    def remove_colleague(self):
+        selection = self.colleagues_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Selection Error", "Please select a colleague to remove.")
+            return
+        idx = selection[0]
+        item = self.colleagues_listbox.get(idx)
+        colleague = item.split('  (', 1)[0] if '  (' in item else item
+
+        if colleague in self.scheduler.colleagues:
+            try:
+                self.scheduler.colleagues.remove(colleague)
+            except ValueError:
+                pass
+            self.scheduler.meta.pop(colleague, None)
+            self.scheduler.schedule.pop(colleague, None)
+
+        self.refresh_schedule_display()
+        self.refresh_colleagues_listbox()
+        messagebox.showinfo("Success", f"Colleague '{colleague}' removed successfully!")
             
     def refresh_colleagues_listbox(self):
         self.colleagues_listbox.delete(0, tk.END)
