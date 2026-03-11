@@ -1,0 +1,48 @@
+{
+  "colleagues": [
+    "t_ramonas",
+    "y_mikitenko",
+    "y_kazeko",
+    "a_naduev",
+    "a_osipov",
+    "a_trubchik",
+    "m_matovic"
+  ],
+  "meta": {
+    "t_ramonas": {
+      "default": "Daily Work Day (09-18)",
+      "offset": 0,
+      "can_fill": false
+    },
+    "y_mikitenko": {
+      "default": "Day Shift (09-21)",
+      "offset": 0,
+      "can_fill": false
+    },
+    "y_kazeko": {
+      "default": "Day Shift (09-21)",
+      "offset": 0,
+      "can_fill": false
+    },
+    "a_naduev": {
+      "default": "Day Shift (09-21)",
+      "offset": 0,
+      "can_fill": false
+    },
+    "a_osipov": {
+      "default": "Day Shift (09-21)",
+      "offset": 0,
+      "can_fill": false
+    },
+    "a_trubchik": {
+      "default": "Day Shift (09-21)",
+      "offset": 0,
+      "can_fill": false
+    },
+    "m_matovic": {
+      "default": "Day Shift (09-21)",
+      "offset": 0,
+      "can_fill": false
+    }
+  }
+}
