@@ -7,19 +7,18 @@ import calendar
 import math
 
 class WorkScheduler:
+    # Shift types: Daily engineers work Mon-Fri 9-6, Shift engineers work day (12-24) and night (21-9)
     SHIFT_TYPES = [
-        "Day Shift (09-21)",
-        "Day Shift (12-24)",
-        "Night Shift (21-09)",
-        "Daily Work Day (09-18)",
+        "Day Shift (12-24)",    # Shift engineer on day shift, worked 12:00-24:00
+        "Night Shift (21-09)",  # Shift engineer on night shift, works 21:00-09:00
+        "Daily Work Day (09-18)",  # Daily engineer Mon-Fri only, 09:00-18:00
         "Rest",
     ]
-    PATTERN = [2, 2]  # 2 work days, 2 rest days
+    PATTERN = [2, 2, 2, 2]  # 2 day shifts, 2 rest, 2 night shifts, 2 rest
     SHIFT_HOURS = {
-        "Day Shift (09-21)": "09:00-21:00",
-        "Day Shift (12-24)": "12:00-24:00",
-        "Night Shift (21-09)": "21:00-09:00",
-        "Daily Work Day (09-18)": "09:00-18:00",
+        "Day Shift (12-24)": "12:00-24:00",      # 12 hours
+        "Night Shift (21-09)": "21:00-09:00",    # 12 hours (21-24 = 3 hrs, 00-09 = 9 hrs)
+        "Daily Work Day (09-18)": "09:00-18:00", # 9 hours
         "Rest": ""
     }
     
@@ -87,11 +86,8 @@ class WorkScheduler:
                 elif is_shift_worker and pattern_cycle is not None:
                     elem = next(pattern_cycle)
                     if elem == 'Day':
-                        # Day shifts: 09-21 on weekends, 12-24 on weekdays
-                        if weekday >= 5:
-                            shift = 'Day Shift (09-21)'
-                        else:
-                            shift = 'Day Shift (12-24)'
+                        # Day shifts: always 12-24 for shift engineers
+                        shift = 'Day Shift (12-24)'
                     elif elem == 'Night':
                         shift = 'Night Shift (21-09)'
                     else:
@@ -208,67 +204,79 @@ class WorkScheduler:
                     # fallback: if no Rest candidate, convert a Day worker to Night (avoid Daily)
                     day_candidates = [c for c in self.colleagues if day_idx < len(self.schedule.get(c, [])) and self.schedule[c][day_idx].get('shift', '').startswith('Day Shift') and self.meta.get(c, {}).get('default') != 'Daily Work Day (09-18)']
                     if day_candidates:
-                        # prefer converting someone who is NOT in a consecutive day pair,
-                        # then prefer those that originally had night planned, then lower hours
-                        scored_days = []
+                        # CONSTRAINT: cannot have night shift immediately after day shift (would be 24 hours straight)
+                        # Check previous day: if previous day was a Day Shift, don't assign
+                        valid_candidates = []
                         for c in day_candidates:
                             sched = self.schedule.get(c, [])
-                            in_pair = 0
-                            if day_idx - 1 >= 0 and day_idx - 1 < len(sched) and sched[day_idx - 1].get('shift','').startswith('Day'):
-                                in_pair = 1
-                            if day_idx + 1 < len(sched) and sched[day_idx + 1].get('shift','').startswith('Day'):
-                                in_pair = 1
-                            orig_sched = orig_schedule.get(c, [])
-                            orig_today = orig_sched[day_idx].get('shift') if day_idx < len(orig_sched) else None
-                            orig_next = orig_sched[day_idx+1].get('shift') if day_idx+1 < len(orig_sched) else None
-                            pref = 0
-                            if orig_today == 'Night Shift (21-09)' or orig_next == 'Night Shift (21-09)':
-                                pref = -1
-                            scored_days.append((in_pair, pref, hours_map.get(c, 0.0), c))
-                        # sort by in_pair (0 preferred), pref (lower preferred), then lower hours
-                        scored_days.sort()
-                        pick = scored_days[0][3]
-                        # convert pick from day to night
-                        prev = self.schedule[pick][day_idx].get('shift', '')
-                        self.schedule[pick][day_idx]['shift'] = 'Night Shift (21-09)'
-                        hours_map[pick] = max(0.0, hours_map.get(pick, 0.0) - self._duration_hours(prev)) + self._duration_hours('Night Shift (21-09)')
+                            can_assign_night = True
+                            if day_idx > 0:
+                                prev_shift = sched[day_idx - 1].get('shift', '')
+                                if prev_shift.startswith('Day Shift'):
+                                    can_assign_night = False
+                            if can_assign_night:
+                                valid_candidates.append(c)
+                        
+                        if valid_candidates:
+                            # prefer converting someone who is NOT in a consecutive day pair,
+                            # then prefer those that originally had night planned, then lower hours
+                            scored_days = []
+                            for c in valid_candidates:
+                                sched = self.schedule.get(c, [])
+                                in_pair = 0
+                                if day_idx - 1 >= 0 and day_idx - 1 < len(sched) and sched[day_idx - 1].get('shift','').startswith('Day'):
+                                    in_pair = 1
+                                if day_idx + 1 < len(sched) and sched[day_idx + 1].get('shift','').startswith('Day'):
+                                    in_pair = 1
+                                orig_sched = orig_schedule.get(c, [])
+                                orig_today = orig_sched[day_idx].get('shift') if day_idx < len(orig_sched) else None
+                                orig_next = orig_sched[day_idx+1].get('shift') if day_idx+1 < len(orig_sched) else None
+                                pref = 0
+                                if orig_today == 'Night Shift (21-09)' or orig_next == 'Night Shift (21-09)':
+                                    pref = -1
+                                scored_days.append((in_pair, pref, hours_map.get(c, 0.0), c))
+                            # sort by in_pair (0 preferred), pref (lower preferred), then lower hours
+                            scored_days.sort()
+                            pick = scored_days[0][3]
+                            # convert pick from day to night
+                            prev = self.schedule[pick][day_idx].get('shift', '')
+                            self.schedule[pick][day_idx]['shift'] = 'Night Shift (21-09)'
+                            hours_map[pick] = max(0.0, hours_map.get(pick, 0.0) - self._duration_hours(prev)) + self._duration_hours('Night Shift (21-09)')
 
             # Recompute counts after night adjustments
             counts = count_shift_types()
 
             # Day-time staffing constraints
-            day_types = ['Day Shift (09-21)', 'Day Shift (12-24)', 'Daily Work Day (09-18)']
+            day_types = ['Day Shift (12-24)', 'Daily Work Day (09-18)']
             day_workers = [c for c in self.colleagues if day_idx < len(self.schedule.get(c, [])) and self.schedule[c][day_idx].get('shift') in day_types]
             day_count_total = len(day_workers)
 
             if weekday < 5:
                 # Weekday rules: prefer one Daily worker plus one Day Shift
                 daily_count = counts.get('Daily Work Day (09-18)', 0)
-                day_shift_count = sum(counts.get(k, 0) for k in self.SHIFT_TYPES if k.startswith('Day Shift'))
+                day_shift_count = counts.get('Day Shift (12-24)', 0)
 
                 if daily_count == 0:
-                    # No daily present: ensure two day shifts (one 09-21 and one 12-24) if possible
+                    # No daily present: ensure two day shifts if possible
                     needed = 2 - day_shift_count
                     while needed > 0:
-                        assign_shift = 'Day Shift (09-21)' if day_shift_count == 0 else 'Day Shift (12-24)'
-                        cand2 = find_candidate(require_can_fill=True, preferred_next_shift=assign_shift, preferred_shift=assign_shift)
+                        cand2 = find_candidate(require_can_fill=True, preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                         if not cand2:
-                            cand2 = find_candidate(preferred_defaults=[s for s in self.SHIFT_TYPES if s.startswith('Day Shift')], preferred_next_shift=assign_shift, preferred_shift=assign_shift)
+                            cand2 = find_candidate(preferred_defaults=['Day Shift (12-24)'], preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                         if not cand2:
-                            cand2 = find_candidate(preferred_next_shift=assign_shift, preferred_shift=assign_shift)
+                            cand2 = find_candidate(preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                         if not cand2:
-                            cand2 = find_candidate(preferred_shift=assign_shift)
+                            cand2 = find_candidate(preferred_shift='Day Shift (12-24)')
                         if not cand2:
                             break
-                        assign_shift = 'Day Shift (09-21)' if day_shift_count == 0 else 'Day Shift (12-24)'
-                        self.schedule[cand2][day_idx]['shift'] = assign_shift
-                        hours_map[cand2] = hours_map.get(cand2, 0.0) + self._duration_hours(assign_shift)
+                        self.schedule[cand2][day_idx]['shift'] = 'Day Shift (12-24)'
+                        hours_map[cand2] = hours_map.get(cand2, 0.0) + self._duration_hours('Day Shift (12-24)')
                         day_shift_count += 1
                         needed -= 1
                 else:
                     # daily present: ensure at least one day shift (12-24)
                     if day_shift_count == 0:
-                        cand = find_candidate(preferred_defaults=[s for s in self.SHIFT_TYPES if s.startswith('Day Shift')], preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
+                        cand = find_candidate(preferred_defaults=['Day Shift (12-24)'], preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                         if not cand:
                             cand = find_candidate(preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                         if not cand:
@@ -304,23 +312,21 @@ class WorkScheduler:
                     day_workers.remove(rem)
 
             else:
-                # Weekend: ensure exactly two day shifts (both 09-21)
+                # Weekend: ensure exactly two day shifts
                 counts = count_shift_types()
-                day_shift_count = sum(counts.get(k, 0) for k in self.SHIFT_TYPES if k.startswith('Day Shift'))
+                day_shift_count = counts.get('Day Shift (12-24)', 0)
                 while day_shift_count < 2:
-                    assign = 'Day Shift (09-21)'
-                    cand = find_candidate(require_can_fill=True, preferred_next_shift=assign, preferred_shift=assign)
+                    cand = find_candidate(require_can_fill=True, preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                     if not cand:
-                        cand = find_candidate(preferred_defaults=[s for s in self.SHIFT_TYPES if s.startswith('Day Shift')], preferred_next_shift=assign, preferred_shift=assign)
+                        cand = find_candidate(preferred_defaults=['Day Shift (12-24)'], preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                     if not cand:
-                        cand = find_candidate(preferred_next_shift=assign, preferred_shift=assign)
+                        cand = find_candidate(preferred_next_shift='Day Shift (12-24)', preferred_shift='Day Shift (12-24)')
                     if not cand:
-                        cand = find_candidate(preferred_shift=assign)
+                        cand = find_candidate(preferred_shift='Day Shift (12-24)')
                     if not cand:
                         break
-                    assign = 'Day Shift (09-21)'
-                    self.schedule[cand][day_idx]['shift'] = assign
-                    hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours(assign)
+                    self.schedule[cand][day_idx]['shift'] = 'Day Shift (12-24)'
+                    hours_map[cand] = hours_map.get(cand, 0.0) + self._duration_hours('Day Shift (12-24)')
                     day_shift_count += 1
 
                 # enforce max 2 day workers
@@ -374,38 +380,48 @@ class WorkScheduler:
             # no Rest candidate: convert a Day worker to Night (shift workers only)
             day_candidates = [c for c in self.colleagues if c not in daily_workers_set and day_idx < len(self.schedule.get(c, [])) and self.schedule[c][day_idx]['shift'].startswith('Day Shift')]
             if day_candidates:
-                # prefer those not in a consecutive day pair and with lower hours
-                scored = []
+                # CONSTRAINT: cannot have night shift immediately after day shift
+                valid_candidates = []
                 for c in day_candidates:
                     sched = self.schedule.get(c, [])
-                    in_pair = 0
-                    if day_idx - 1 >= 0 and day_idx - 1 < len(sched) and sched[day_idx - 1].get('shift','').startswith('Day'):
-                        in_pair = 1
-                    if day_idx + 1 < len(sched) and sched[day_idx + 1].get('shift','').startswith('Day'):
-                        in_pair = 1
-                    scored.append((in_pair, hours_map.get(c, 0.0), c))
-                scored.sort()
-                pick = scored[0][2]
-                prev = self.schedule[pick][day_idx].get('shift','')
-                self.schedule[pick][day_idx]['shift'] = 'Night Shift (21-09)'
-                hours_map[pick] = max(0.0, hours_map.get(pick, 0.0) - self._duration_hours(prev)) + self._duration_hours('Night Shift (21-09)')
+                    can_assign = True
+                    if day_idx > 0:
+                        prev_shift = sched[day_idx - 1].get('shift', '')
+                        if prev_shift.startswith('Day Shift'):
+                            can_assign = False
+                    if can_assign:
+                        valid_candidates.append(c)
+                
+                candidates_to_use = valid_candidates if valid_candidates else day_candidates
+                if candidates_to_use:
+                    scored = []
+                    for c in candidates_to_use:
+                        sched = self.schedule.get(c, [])
+                        in_pair = 0
+                        if day_idx - 1 >= 0 and day_idx - 1 < len(sched) and sched[day_idx - 1].get('shift','').startswith('Day'):
+                            in_pair = 1
+                        if day_idx + 1 < len(sched) and sched[day_idx + 1].get('shift','').startswith('Day'):
+                            in_pair = 1
+                        scored.append((in_pair, hours_map.get(c, 0.0), c))
+                    scored.sort()
+                    pick = scored[0][2]
+                    prev = self.schedule[pick][day_idx].get('shift','')
+                    self.schedule[pick][day_idx]['shift'] = 'Night Shift (21-09)'
+                    hours_map[pick] = max(0.0, hours_map.get(pick, 0.0) - self._duration_hours(prev)) + self._duration_hours('Night Shift (21-09)')
 
-                # ensure day coverage: if we removed a day worker, fill from Rest if possible
-                day_types = ['Day Shift (09-21)', 'Day Shift (12-24)', 'Daily Work Day (09-18)']
-                day_workers = [c for c in self.colleagues if day_idx < len(self.schedule.get(c, [])) and self.schedule[c][day_idx].get('shift') in day_types]
-                if len(day_workers) < 2:
-                    need = 2 - len(day_workers)
-                    for _ in range(need):
-                        # try to find Rest candidate who can fill (shift workers only)
-                        pool = [c for c in self.colleagues if c not in daily_workers_set and day_idx < len(self.schedule.get(c, [])) and self.schedule[c][day_idx]['shift'] == 'Rest']
-                        if not pool:
-                            break
-                        fill = min(pool, key=lambda x: hours_map.get(x,0.0))
-                        # assign a day shift type depending on weekday
-                        wd = date_obj.weekday()
-                        assign = 'Day Shift (09-21)' if wd >= 5 else 'Day Shift (12-24)'
-                        self.schedule[fill][day_idx]['shift'] = assign
-                        hours_map[fill] = hours_map.get(fill,0.0) + self._duration_hours(assign)
+                    # ensure day coverage: if we removed a day worker, fill from Rest if possible
+                    day_types = ['Day Shift (12-24)', 'Daily Work Day (09-18)']
+                    day_workers = [c for c in self.colleagues if day_idx < len(self.schedule.get(c, [])) and self.schedule[c][day_idx].get('shift') in day_types]
+                    if len(day_workers) < 2:
+                        need = 2 - len(day_workers)
+                        for _ in range(need):
+                            # try to find Rest candidate who can fill (shift workers only)
+                            pool = [c for c in self.colleagues if c not in daily_workers_set and day_idx < len(self.schedule.get(c, [])) and self.schedule[c][day_idx]['shift'] == 'Rest']
+                            if not pool:
+                                break
+                            fill = min(pool, key=lambda x: hours_map.get(x,0.0))
+                            self.schedule[fill][day_idx]['shift'] = 'Day Shift (12-24)'
+                            hours_map[fill] = hours_map.get(fill,0.0) + self._duration_hours('Day Shift (12-24)')
 
         for c in self.colleagues:
             if c in daily_workers_set:
@@ -502,6 +518,32 @@ class WorkScheduler:
             self.meta = data.get('meta', {})
         except Exception as e:
             print(f"Error loading colleagues: {e}")
+
+    def save_schedule(self, filename: str) -> None:
+        """Save full schedule (colleagues, metadata, and generated schedule) to a JSON file."""
+        import json
+        try:
+            data = {
+                'colleagues': self.colleagues,
+                'meta': self.meta,
+                'schedule': self.schedule
+            }
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Error saving schedule: {e}")
+
+    def load_schedule(self, filename: str) -> None:
+        """Load full schedule (colleagues, metadata, and generated schedule) from a JSON file."""
+        import json
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            self.colleagues = data.get('colleagues', [])
+            self.meta = data.get('meta', {})
+            self.schedule = data.get('schedule', {})
+        except Exception as e:
+            print(f"Error loading schedule: {e}")
 
 
 class SchedulerApp:
@@ -616,7 +658,6 @@ class SchedulerApp:
 
         # styling map for shift colors
         self._style_map = {
-            'Day Shift (09-21)': '#ffd7a6',
             'Day Shift (12-24)': '#ffd7a6',
             'Night Shift (21-09)': '#cfe8ff',
             'Daily Work Day (09-18)': '#d6f5d6',
